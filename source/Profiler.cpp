@@ -6,6 +6,8 @@
 /// SPDX-License-Identifier: MIT                                              
 ///                                                                           
 #include <Langulus/Profiler.hpp>
+#include <Langulus/Core/Assume.hpp>
+#include <fmt/chrono.h>
 
 #if not LANGULUS_FEATURE(PROFILING)
    #error This file shouldn't be built at all if LANGULUS_FEATURE_PROFILING is disabled
@@ -20,232 +22,292 @@ namespace Langulus::Profiler
 
    /// Configure the profiler                                                 
    ///   @param profiling_file - file to write results into                   
-   ///   @param update_interval - interval at which to write to file          
-   ///      higher frequency might affect performance measurements            
-   void State::Configure(String&& profiling_file, Time update_interval) noexcept {
+   void State::Configure(String&& profiling_file) noexcept {
       output_file = ::std::forward<String>(profiling_file);
-      output_interval = update_interval;
-      last_output_timestamp = Clock::now();
-   }
-
-   State::~State() {
-      DumpProfilerResults();
    }
 
    /// Begin a scoped measurement                                             
-   ///   @param n - the mame of the measurement, usually the function name    
+   ///   @param n - the name of the measurement, usually the function name    
+   ///   @param b - the build configuration (should be inline-generated)      
    ///   @return the auto-stopper                                             
-   auto State::Start(String&& n) -> Stopper {
-      if (main) {
-         auto found = main.get();
-         while (found and found->running) {
-            // A measurement is already running, so find the last one   
-            // in the hierarchy                                         
-            if (not found->children.empty())
-               found = found->children.rbegin()->get();
-            else
-               break;
-         }
-
-         if (found) {
-            if (not found->running and found == main.get()) {
-               // Main measurement has ended, it is time to compile     
-               // the results and reset the state                       
-               CompileAndDump();
-               main = std::make_shared<Measurement>(::std::forward<String>(n));
-               return main;
-            }
-
-            // Can't start twice                                        
-            if (found->running and found->name == n)
-               return {};
-
-            // Start a new measurement as a child to the currently      
-            // running one                                              
-            return found->children.emplace_back(
-               ::std::make_shared<Measurement>(::std::forward<String>(n))
-            );
-         }
-         else {
-            Logger::Error("Profiler: Shouldn't ever be reached: ", LANGULUS_LOCATION());
-            return {};
-         }
-      }
-      else {
+   auto State::Start(String&& n, Build&& b) -> Stopper {
+      auto stack = main;
+      if (not stack) {
          // First measurement is always the master measurement          
          // Place it in your main function                              
-         main = ::std::make_shared<Measurement>(::std::forward<String>(n));
+         main = new Measurement (
+            ::std::forward<String>(n),
+            ::std::forward<Build>(b),
+            nullptr
+         );
          return main;
       }
+
+      // Otherwise add the new measurement as a child to the previous   
+      while (stack->child) {
+         // Avoid nesting calls - only the top level is measured        
+         if (stack->child->name == n and stack->child->build == b)
+            return {};
+         stack = stack->child;
+      }
+
+      LANGULUS_ASSERT(not stack->child, Access,
+         "A measurement already has children"
+      );
+      stack->child = new Measurement {
+         ::std::forward<String>(n),
+         ::std::forward<Build>(b),
+         stack
+      };
+      return stack->child;
+   }
+
+   /// End all measurements, compile the results, and write file              
+   void State::End() {
+      DumpProfilerResults();
    }
 
    /// Dump the results into a text file                                      
+   ///   @param b - the build configuration (should be inline-generated)      
    void State::DumpProfilerResults() const {
-      LANGULUS_PROFILE();
       std::ofstream out;
       out.open(output_file, ::std::ios::out);
       if (not out)
          return;
 
-      for (auto& r : results)
-         DumpInner(out, 0, *r.second, 0, Time::min());
+      const auto now = ::std::chrono::system_clock::to_time_t(::std::chrono::system_clock::now());
+      const auto timestamp = fmt::format("{:%F %T %Z}", fmt::localtime(now));
 
+      out << "<!DOCTYPE html><html>\n";
+      out << "<body style = \"color: LightGray; background-color: black; font-family: monospace; font-size: 14px; white-space: pre; \">\n";
+      out << "<head><style>\n";
+      out << "   div {\n";
+      out << "      margin: 0em;\n";
+      out << "      padding-left: 2em;\n";
+      out << "      line-height: 9px;\n";
+      out << "   }\n";
+      out << "   h2 {\n";
+      out << "      margin: 0em;\n";
+      out << "      padding-left: 0em;\n";
+      out << "      line-height: 14px;\n";
+      out << "   }\n";
+      out << "   h3 {\n";
+      out << "      margin: 0em;\n";
+      out << "      padding-left: 1em;\n";
+      out << "      line-height: 12px;\n";
+      out << "   }\n";
+      out << "   details {\n";
+      out << "      margin: 0em;\n";
+      out << "      padding-left: 2em;\n";
+      out << "      line-height: 12px;\n";
+      out << "   }\n";
+      out << "</style></head>\n";
+      out << "<h2>Last performance results: " << timestamp << "</h2>\n";
+
+      for (auto& r : results)
+         for (auto& r2 : r.second)
+            r2.second->Dump(out, nullptr);
+
+      out << "</body></html>";
       out.close();
    }
 
    /// Compile all gathered measurements into the results, and write          
    /// statistics to a file, if interval has passed                           
-   void State::CompileAndDump() {
-      if (Clock::now() > last_output_timestamp + output_interval) {
-         // Time to dump the results up until now                       
-         last_output_timestamp = Clock::now();
-         DumpProfilerResults();
-      }
+   ///   @param b - the build configuration (should be inline-generated)      
+   void State::Compile(Measurement* b) {
+      LANGULUS_ASSERT(not b->child, Access,
+         "A measurement still has children, they should be compiled "
+         "first when they go out of scope! They are on another thread maybe?"
+      );
 
-      if (main) {
-         // Consume the main measurement and all of its children        
-         auto& newChild = results[main->name];
-         if (not newChild) {
-            newChild = ::std::make_unique<Result>();
-            newChild->Integrate(true, *main);
-         }
-         else newChild->Integrate(false, *main);
-         
-         main.reset();
-      }
-   }
+      if (not b->parent) {
+         // We're compiling the main measurement                        
+         auto& found_function = results[b->name];
+         auto& found_build = found_function[b->build];
+         if (found_build)
+            found_build->Integrate(*b);
+         else
+            found_build = ::std::make_unique<Result>(*b);
 
-   ///                                                                        
-   void State::DumpInner(::std::ofstream& out, int depth, const Result& r, int parentSamples, Time parentTime) const {
-      // Write name                                                     
-      String prefix;
-      for (int i = 0; i < depth; ++i)
-         prefix += "|  ";
-      out << prefix << r.name << ::std::endl;
-
-      // Write how often the function gets called in its parent         
-      if (parentSamples and r.samples != parentSamples) {
-         if (parentSamples < r.samples) {
-            // The execution happens multiple times per parent call     
-            out << prefix << "|- happens about " << (r.samples / parentSamples)
-                << " times per parent call (on average across " << r.samples << " samples)" << ::std::endl;
-         }
-         else {
-            // The execution happens less often than the parent call    
-            int howOften = int((float(r.samples) / float(parentSamples)) * 100.0f);
-            out << prefix << "|- has " << howOften
-                << "% chance to be called from parent (on average across " << r.samples << ")" << ::std::endl;
-         }
-      }
-      else {
-         // The execution happens exactly as much as parent call        
-         out << prefix << "|- happens on each parent call (" << r.samples << " samples)" << ::std::endl;
-      }
-
-      // Write time stats                                               
-      if (r.samples > 1) {
-         out << prefix << "|- min time per call: " << RealMs(r.min) << " ms; " << ::std::endl;
-         out << prefix << "|- max time per call: " << RealMs(r.max) << " ms; " << ::std::endl;
-         out << prefix << "|- avg time per call: " << RealMs(r.average) << " ms; " << ::std::endl;
-      }
-      else {
-         out << prefix << "|- time per call: " << RealMs(r.average) << " ms; " << ::std::endl;
-      }
-
-      if (parentSamples and parentSamples < r.samples) {
-         const auto total = (double(r.samples) / double(parentSamples)) * RealMs(r.average);
-         out << prefix << "|- for total time of: " << total << " ms" << ::std::endl;
-      }
-
-      // Write time usage portion                                       
-      if (parentTime != Time::min()) {
-         auto portion = RealMs(r.average) / RealMs(parentTime);
-         out << prefix << "|- consumes " << int(portion * 100.0f)
-             << "% of the parent function (average) time" << ::std::endl;
-      }
-
-      // Do the same for sub-measurements                               
-      if (not r.children.empty()) {
-         out << prefix << "|- of which...:" << ::std::endl;
-         for (auto& child : r.children) {
-            // Make sure results appear in the appropriate depth        
-            int depthOffset = 1;
-            const Result* parent = &r;
-            while (parent and child.second->average > parent->average) {
-               parent = parent->parent;
-               --depthOffset;
-            }
-
-            if (parent)
-               DumpInner(out, depth + depthOffset, *child.second, parent->samples, parent->average);
-            else
-               DumpInner(out, 0, *child.second, 0, Time::min());
-         }
-      }
-
-      out << ::std::endl;
-   }
-
-
-   State::Measurement::Measurement(String&& n) noexcept
-      : name  {::std::forward<String>(n)}
-      , start {Clock::now()}
-      , end   {start} {}
-
-   void State::Measurement::Stop() noexcept {
-      end = Clock::now();
-      running = false;
-   }
-
-   State::Stopper::Stopper(const MeasurementPtr& m) noexcept
-      : measurement {m} {}
-
-   State::Stopper::~Stopper() {
-      if (measurement)
-         measurement->Stop();
-   }
-
-   /// Compile all gathered measurements into a Result                        
-   ///   @param isNew - did the measurement already exist in this context?    
-   ///   @param m - the measurement to compile                                
-   void State::Result::Integrate(bool isNew, const Measurement& m) {
-      if (m.running) {
-         Logger::Error("Can't integrate measurements while they're still running: ", m.name);
+         // Once it stops we dump the results in a file                 
+         active_builds.insert(b->build);
+         Instance.End();
          return;
       }
 
-      const auto duration = m.end - m.start;
-      if (isNew) {
-         name = m.name;
-         min = max = average = duration;
-         samples = 1;
+      if (b->parent->compiled) {
+         // A result already exists, just integrate over it             
+         auto& found_function = b->parent->compiled->children[b->name];
+         auto& found_build = found_function[b->build];
+         if (found_build)
+            found_build->Integrate(*b);
+         else
+            found_build = ::std::make_unique<Result>(*b);
 
-         for (auto& sm : m.children) {
-            auto& newChild = children[sm->name];
-            newChild = ::std::make_unique<Result>();
-            newChild->parent = this;
-            newChild->Integrate(true, *sm);
+         if (b->start != b->end) {
+            // A child has been compiled                                
+            active_builds.insert(b->build);
+            b->parent->child = nullptr;
          }
+         else b->compiled = found_build.get();
       }
       else {
+         // We have to build the result hierarchy from the ground up    
+         // and cache it so we don't have to do it again                
+         auto node = main;
+         while (node) {
+            if (not node->compiled) {
+               auto& found_function = node->parent
+                  ? node->parent->compiled->children[node->name]
+                  : results[node->name];
+               auto& found_build = found_function[node->build];
+               if (found_build)
+                  found_build->Integrate(*node);
+               else
+                  found_build = ::std::make_unique<Result>(*node);
+
+               if (node->parent and node->start != node->end) {
+                  // A measurement has been compiled                    
+                  active_builds.insert(node->build);
+                  node->parent->child = nullptr;
+                  break;
+               }
+               
+               node->compiled = found_build.get();
+            }
+
+            node = node->child;
+         }
+      }
+   }
+
+   State::Measurement::Measurement(String&& n, Build&& b, Measurement* p) noexcept
+      : name   {::std::forward<String>(n)}
+      , build  {::std::forward<Build>(b)}
+      , start  {Clock::now()}
+      , end    {start}
+      , parent {p} {}
+
+   void State::Measurement::Stop() noexcept {
+      end = Clock::now();
+      Instance.Compile(this);
+   }
+
+   State::Stopper::Stopper(Measurement* m) noexcept
+      : measurement {m} {}
+      
+   State::Stopper::~Stopper() {
+      if (measurement) {
+         measurement->Stop();
+         delete measurement;
+      }
+   }
+
+   /// Compile a measurement into a Result                                    
+   ///   @param m - the measurement to compile                                
+   State::Result::Result(const Measurement& m) {
+      name = m.name;
+      build = m.build;
+
+      if (m.end != m.start) {
+         const auto duration = m.end - m.start;
+         min = max = average = total = duration;
+         samples = 1;
+      }
+   }
+
+   /// Compile a measurements into an already existing Result                 
+   ///   @param m - the measurement to compile                                
+   void State::Result::Integrate(const Measurement& m) {
+      if (m.end == m.start)
+         return;
+
+      const auto duration = m.end - m.start;
+      if (samples == 0) {
+         // First measurement                                           
+         min = max = average = total = duration;
+         samples = 1;
+      }
+      else {
+         // Consecutive measurements (averaging a sample)               
          ++samples;
          average = (((samples - 1) * average) + duration) / samples;
+         total += duration;
 
          if (duration < min)
             min = duration;
          if (duration > max)
             max = duration;
+      }
+   }
+   
+   /// Write a result as HTML                                                 
+   ///   @param out - file to write to                                        
+   ///   @param parent - parent result for contextualizing data               
+   void State::Result::Dump(::std::ofstream& out, const Result* parent) const {
+      // Write name and build                                           
+      const Real hot = parent ? RealMs(total) / RealMs(parent->total) : 1;
+      const auto hex = Logger::Hex(build);
+      const bool act = Instance.active_builds.contains(build) and hot > 0.1_real;
 
-         for (auto& sm : m.children) {
-            auto& newChild = children[sm->name];
-            if (not newChild) {
-               newChild = ::std::make_unique<Result>();
-               newChild->parent = this;
-               newChild->Integrate(true, *sm);
+      if (act) {
+         out << "<details open><summary><h3>" << name
+             << " [BUILD: " << std::string(std::begin(hex), std::end(hex)) << "]</h3></summary>\n";
+      }
+      else {
+         out << "<details><summary><h3>" << name
+             << " [BUILD: " << std::string(std::begin(hex), std::end(hex)) << "]</h3></summary>\n";
+      }
+
+      // Write how often the function gets called in its parent         
+      if (parent and parent->samples) {
+         if (samples != parent->samples) {
+            if (parent->samples < samples) {
+               // The execution happens multiple times per parent call  
+               out << "<div>- happens about " << (samples / parent->samples)
+                   << " times per parent call</div>\n";
             }
-            else newChild->Integrate(false, *sm);
+            else {
+               // The execution happens less often than the parent call 
+               int howOften = int((float(samples) / float(parent->samples)) * 100.0f);
+               out << "<div>- has " << howOften
+                   << "% chance to be called from parent</div>\n";
+            }
+         }
+         else {
+            // The execution happens exactly as much as parent call     
+            out << "<div>- happens on each parent call</div>\n";
          }
       }
+
+      // Write time stats                                               
+      if (samples > 1) {
+         out << "<div>- min time per call: " << RealMs(min)     << " ms;</div>\n";
+         out << "<div>- avg time per call: " << RealMs(average) << " ms;</div>\n";
+         out << "<div>- max time per call: " << RealMs(max)     << " ms;</div>\n";
+         out << "<div>- " << samples << " executions, for total time: " << RealMs(total) << " ms;</div>\n";
+      }
+      else {
+         out << "<div>- 1 execution, for total time: " << RealMs(total) << " ms;</div>\n";
+      }
+
+      // Write time usage portion                                       
+      if (parent) {
+         auto portion = RealMs(total) / RealMs(parent->total);
+         out << "<div>- consumes " << int(portion * 100.0f)
+               << "% of the parent function total time </div>\n";
+      }
+
+      // Do the same for sub-measurements                               
+      if (not children.empty()) {
+         out << "<div>of which:</div>\n";
+         for (auto& cccc : children)
+            for (auto& child : cccc.second)
+               child.second->Dump(out, this);
+      }
+
+      out << "</details>\n";
    }
 
 } // namespace Langulus::Profiler

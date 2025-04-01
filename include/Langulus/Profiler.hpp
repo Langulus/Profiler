@@ -8,10 +8,13 @@
 #include <Langulus/Logger.hpp>
 
 #if LANGULUS_FEATURE(PROFILING)
+#include "../../source/Build.hpp"
 #include <chrono>
 #include <string>
 #include <vector>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 
 
 #if defined(LANGULUS_EXPORT_ALL) or defined(LANGULUS_EXPORT_PROFILER)
@@ -38,6 +41,7 @@ namespace Langulus::Profiler
    long double RealMs(Time t) noexcept {
       return ::std::chrono::duration_cast<Nano>(t).count() / 1'000'000.0;
    }
+   
 
    ///                                                                        
    /// The profiler state object, keeping track of running measurements       
@@ -48,24 +52,21 @@ namespace Langulus::Profiler
       struct Stopper;
 
       using ResultPtr = ::std::unique_ptr<Result>;
-      using MeasurementPtr = ::std::shared_ptr<Measurement>;
+      using Database = ::std::unordered_map<String, ::std::unordered_map<Build, ResultPtr>>;
 
    private:
-      ::std::shared_ptr<Measurement> main;
-      ::std::unordered_map<String, ResultPtr> results;
-      String output_file = "profiling.md";
-      Time output_interval = 1s;
-      TimePoint last_output_timestamp = Clock::now();
+      Measurement* main;
+      Database results;
+      ::std::unordered_set<Build> active_builds;
+      String output_file = "profiling.htm";
 
-      LANGULUS_API(PROFILER) void CompileAndDump();
+      LANGULUS_API(PROFILER) void Compile(Measurement*);
       LANGULUS_API(PROFILER) void DumpProfilerResults() const;
-      LANGULUS_API(PROFILER) void DumpInner(::std::ofstream&, int, const Result&, int, Time) const;
 
    public:
-      LANGULUS_API(PROFILER) void Configure(String&&, Time) noexcept;
-      LANGULUS_API(PROFILER) ~State();
-
-      LANGULUS_API(PROFILER) auto Start(String&&) -> Stopper;
+      LANGULUS_API(PROFILER) void Configure(String&&) noexcept;
+      LANGULUS_API(PROFILER) auto Start(String&&, Build&&) -> Stopper;
+      LANGULUS_API(PROFILER) void End();
    };
 
 
@@ -79,16 +80,18 @@ namespace Langulus::Profiler
    struct State::Measurement {
    protected:
       friend struct State;
-      String    name;
-      TimePoint start;
-      TimePoint end;
-      bool      running = true;
-      ::std::vector<MeasurementPtr> children;
+      String       name;
+      Build        build;
+      TimePoint    start;
+      TimePoint    end;
+      Measurement* parent = nullptr;
+      Measurement* child = nullptr;
+      Result*      compiled = nullptr;
 
    public:
       Measurement() = delete;
 
-      LANGULUS_API(PROFILER) Measurement(String&&) noexcept;
+      LANGULUS_API(PROFILER) Measurement(String&&, Build&&, Measurement*) noexcept;
       LANGULUS_API(PROFILER) void Stop() noexcept;
    };
 
@@ -98,13 +101,13 @@ namespace Langulus::Profiler
    ///                                                                        
    struct State::Stopper {
    private:
-      MeasurementPtr measurement;
+      Measurement* measurement = nullptr;
 
    public:
       Stopper() = default;
       Stopper(const Stopper&) = delete;
 
-      LANGULUS_API(PROFILER)  Stopper(const MeasurementPtr&) noexcept;
+      LANGULUS_API(PROFILER)  Stopper(Measurement*) noexcept;
       LANGULUS_API(PROFILER) ~Stopper();
    };
 
@@ -113,30 +116,41 @@ namespace Langulus::Profiler
    /// A compiled result                                                      
    ///                                                                        
    struct State::Result {
-      const Result* parent = nullptr;
       String name;
-      Time min, max, average;
-      long long samples;
-      ::std::unordered_map<String, ResultPtr> children;
+      Build build;
+      Time min = Time::max();
+      Time max = Time::min();
+      Time average = 0ms;
+      Time total = 0ms;
+      long long samples = 0;
+      Database children;
 
-      LANGULUS_API(PROFILER) void Integrate(bool isNew, const Measurement&);
+      Result() = delete;
+      LANGULUS_API(PROFILER) Result(const Measurement&);
+      LANGULUS_API(PROFILER) void Integrate(const Measurement&);
+      LANGULUS_API(PROFILER) void Dump(::std::ofstream&, const Result* parent) const;
    };
 
 
    /// Start doing a measurement                                              
    ///   @param n - name of the measurement, usually the function name        
+   ///   @param build - the build identifier (should be inline-generated)     
    ///   @return the auto-stopper                                             
    LANGULUS(ALWAYS_INLINED)
-   State::Stopper Start(String&& n) {
-      return Instance.Start(::std::forward<String>(n));
+   State::Stopper Start(String&& n, Build&& build) {
+      return Instance.Start(
+         ::std::forward<String>(n),
+         ::std::forward<Build>(build)
+      );
    }
 
 } // namespace Langulus::Profiler
 
 #undef LANGULUS_PROFILE
 
-/// Start a scoped profiling                                                  
+/// Start scoped profiling                                                    
+/// Add one of these in the beginning of all functions you want to profile    
 #define LANGULUS_PROFILE() \
-   const auto scoped_profiler____________ = ::Langulus::Profiler::Start(LANGULUS(FUNCTION))
+   const auto scoped_profiler____________ = ::Langulus::Profiler::Start(LANGULUS_FUNCTION(), ::Langulus::Profiler::Build {})
 
 #endif
