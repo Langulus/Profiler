@@ -5,6 +5,7 @@
 ///                                                                           
 /// SPDX-License-Identifier: MIT                                              
 ///                                                                           
+#pragma once
 #include <Langulus/Logger.hpp>
 
 #if LANGULUS_FEATURE(PROFILING)

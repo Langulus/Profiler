@@ -112,9 +112,8 @@ namespace Langulus::Profiler
       out.close();
    }
 
-   /// Compile all gathered measurements into the results, and write          
-   /// statistics to a file, if interval has passed                           
-   ///   @param b - the build configuration (should be inline-generated)      
+   /// Compile a measurement into the results                                 
+   ///   @param b - the measurement to compile                                
    void State::Compile(Measurement* b) {
       LANGULUS_ASSERT(not b->child, Access,
          "A measurement still has children, they should be compiled "
