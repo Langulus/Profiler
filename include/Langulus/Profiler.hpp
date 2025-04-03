@@ -83,6 +83,7 @@ namespace Langulus::Profiler
       friend struct State;
       String       name;
       Build        build;
+      bool         ended = false;
       TimePoint    start;
       TimePoint    end;
       Measurement* parent = nullptr;
@@ -105,11 +106,28 @@ namespace Langulus::Profiler
       Measurement* measurement = nullptr;
 
    public:
-      Stopper() = default;
       Stopper(const Stopper&) = delete;
 
-      LANGULUS_API(PROFILER)  Stopper(Measurement*) noexcept;
-      LANGULUS_API(PROFILER) ~Stopper();
+      LANGULUS(ALWAYS_INLINED)
+      Stopper() = default;
+
+      LANGULUS(ALWAYS_INLINED)
+      Stopper(Measurement* m) noexcept
+         : measurement {m} {}
+
+      LANGULUS(ALWAYS_INLINED)
+      Stopper(Stopper&& rhs) noexcept
+         : measurement {rhs.measurement} {
+         rhs.measurement = nullptr;
+      }
+
+      LANGULUS(ALWAYS_INLINED)
+      ~Stopper() {
+         if (measurement) {
+            measurement->Stop();
+            delete measurement;
+         }
+      }
    };
 
 

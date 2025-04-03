@@ -48,10 +48,11 @@ namespace Langulus::Profiler
          // Avoid nesting calls - only the top level is measured        
          if (stack->child->name == n and stack->child->build == b)
             return {};
+
          stack = stack->child;
       }
 
-      LANGULUS_ASSERT(not stack->child, Access,
+      LANGULUS_ASSUME(DevAssumes, not stack->child,
          "A measurement already has children"
       );
       stack->child = new Measurement {
@@ -115,9 +116,10 @@ namespace Langulus::Profiler
    /// Compile a measurement into the results                                 
    ///   @param b - the measurement to compile                                
    void State::Compile(Measurement* b) {
-      LANGULUS_ASSERT(not b->child, Access,
-         "A measurement still has children, they should be compiled "
-         "first when they go out of scope! They are on another thread maybe?"
+      LANGULUS_ASSUME(DevAssumes, not b->child,
+         "A measurement (", b->name, ") still has a child running (", b->child->name,"), "
+         "they should be compiled first when they go out of scope! "
+         "Are they on different threads maybe?"
       );
 
       if (not b->parent) {
@@ -144,7 +146,7 @@ namespace Langulus::Profiler
          else
             found_build = ::std::make_unique<Result>(*b);
 
-         if (b->start != b->end) {
+         if (b->ended) {
             // A child has been compiled                                
             active_builds.insert(b->build);
             b->parent->child = nullptr;
@@ -166,7 +168,7 @@ namespace Langulus::Profiler
                else
                   found_build = ::std::make_unique<Result>(*node);
 
-               if (node->parent and node->start != node->end) {
+               if (node->parent and node->ended) {
                   // A measurement has been compiled                    
                   active_builds.insert(node->build);
                   node->parent->child = nullptr;
@@ -186,21 +188,16 @@ namespace Langulus::Profiler
       , build  {::std::forward<Build>(b)}
       , start  {Clock::now()}
       , end    {start}
-      , parent {p} {}
+      , parent {p} {
+      LANGULUS_ASSUME(DevAssumes, not parent or not parent->child,
+         "A parent already has a child"
+      );
+   }
 
    void State::Measurement::Stop() noexcept {
       end = Clock::now();
+      ended = true;
       Instance.Compile(this);
-   }
-
-   State::Stopper::Stopper(Measurement* m) noexcept
-      : measurement {m} {}
-      
-   State::Stopper::~Stopper() {
-      if (measurement) {
-         measurement->Stop();
-         delete measurement;
-      }
    }
 
    /// Compile a measurement into a Result                                    
@@ -209,7 +206,7 @@ namespace Langulus::Profiler
       name = m.name;
       build = m.build;
 
-      if (m.end != m.start) {
+      if (m.ended) {
          const auto duration = m.end - m.start;
          min = max = average = total = duration;
          samples = 1;
@@ -219,7 +216,7 @@ namespace Langulus::Profiler
    /// Compile a measurements into an already existing Result                 
    ///   @param m - the measurement to compile                                
    void State::Result::Integrate(const Measurement& m) {
-      if (m.end == m.start)
+      if (not m.ended)
          return;
 
       const auto duration = m.end - m.start;
