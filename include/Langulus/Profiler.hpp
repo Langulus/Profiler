@@ -59,13 +59,16 @@ namespace Langulus::Profiler
       Measurement* main;
       Database results;
       ::std::unordered_set<Build> active_builds;
+
       String output_file = "profiling.htm";
+      Time output_interval = 1s;
+      TimePoint last_output_timestamp = Clock::now();
 
       LANGULUS_API(PROFILER) void Compile(Measurement*);
       LANGULUS_API(PROFILER) void DumpProfilerResults() const;
 
    public:
-      LANGULUS_API(PROFILER) void Configure(String&&) noexcept;
+      LANGULUS_API(PROFILER) void Configure(String&&, Time interval) noexcept;
       LANGULUS_API(PROFILER) auto Start(String&&, Build&&) -> Stopper;
       LANGULUS_API(PROFILER) void End();
    };
@@ -140,7 +143,7 @@ namespace Langulus::Profiler
       Time min = Time::max();
       Time max = Time::min();
       Time average = 0ms;
-      Time total = 0ms;
+      mutable Time total = 0ms;
       long long samples = 0;
       Database children;
 
