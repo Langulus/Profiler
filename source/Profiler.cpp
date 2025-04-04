@@ -22,8 +22,11 @@ namespace Langulus::Profiler
 
    /// Configure the profiler                                                 
    ///   @param profiling_file - file to write results into                   
-   void State::Configure(String&& profiling_file) noexcept {
+   ///   @param interval - use zero to disable runtime writing to file        
+   void State::Configure(String&& profiling_file, Time interval) noexcept {
       output_file = ::std::forward<String>(profiling_file);
+      output_interval = interval;
+      last_output_timestamp = Clock::now();
    }
 
    /// Begin a scoped measurement                                             
@@ -71,13 +74,14 @@ namespace Langulus::Profiler
    /// Dump the results into a text file                                      
    ///   @param b - the build configuration (should be inline-generated)      
    void State::DumpProfilerResults() const {
-      std::ofstream out;
-      out.open(output_file, ::std::ios::out);
-      if (not out)
-         return;
-
+      LANGULUS(PROFILE);
       const auto now = ::std::chrono::system_clock::to_time_t(::std::chrono::system_clock::now());
       const auto timestamp = fmt::format("{:%F %T %Z}", fmt::localtime(now));
+
+      std::ofstream out;
+      out.open(output_file, ::std::ios::out | ::std::ios::trunc);
+      if (not out.is_open())
+         Logger::Error("Can't open profiling file: ", output_file);
 
       out << "<!DOCTYPE html><html>\n";
       out << "<body style = \"color: LightGray; background-color: black; font-family: monospace; font-size: 14px; white-space: pre; \">\n";
@@ -152,6 +156,14 @@ namespace Langulus::Profiler
             b->parent->child = nullptr;
          }
          else b->compiled = found_build.get();
+
+         // We still have to climb and update total time for running    
+         // results                                                     
+         auto p = b->parent;
+         while (p and not p->ended) {
+            p->compiled->Integrate(*p);
+            p = p->parent;
+         }
       }
       else {
          // We have to build the result hierarchy from the ground up    
@@ -180,6 +192,12 @@ namespace Langulus::Profiler
 
             node = node->child;
          }
+      }
+
+      if (output_interval != 0s and Clock::now() > last_output_timestamp + output_interval) {
+         // Time to dump the results up until now                       
+         last_output_timestamp = Clock::now();
+         DumpProfilerResults();
       }
    }
 
@@ -211,13 +229,17 @@ namespace Langulus::Profiler
          min = max = average = total = duration;
          samples = 1;
       }
+      else total = Clock::now() - m.start;
    }
 
-   /// Compile a measurements into an already existing Result                 
+   /// Compile a measurement into an already existing Result                  
    ///   @param m - the measurement to compile                                
    void State::Result::Integrate(const Measurement& m) {
-      if (not m.ended)
+      if (not m.ended) {
+         if (samples == 0)
+            total = Clock::now() - m.start;
          return;
+      }
 
       const auto duration = m.end - m.start;
       if (samples == 0) {
@@ -243,16 +265,32 @@ namespace Langulus::Profiler
    ///   @param parent - parent result for contextualizing data               
    void State::Result::Dump(::std::ofstream& out, const Result* parent) const {
       // Write name and build                                           
-      const Real hot = parent ? RealMs(total) / RealMs(parent->total) : 1;
+      const Real hot = parent ? RealMs(total) / RealMs(parent->total) : 1_real;
       const auto hex = Logger::Hex(build);
-      const bool act = Instance.active_builds.contains(build) and hot > 0.1_real;
+      const bool act = Instance.active_builds.contains(build) and hot > 0.25_real;
 
+      // Color-code hot results:                                        
+      //    -> blue if relative_hotness goes to zero                    
+      //    -> white if relative_hotness goes to 0.5                    
+      //    -> red if relative_hotness goes to 1                        
+      int red = 255;
+      int green = 255;
+      int blue = 255;
+      if (parent) {
+         const Real relative_hotness = std::max(std::min(hot, 1_real), 0_real);
+         if (relative_hotness < 0.5f)
+            red = green = 128 + static_cast<int>((relative_hotness * 2_real) * 128_real);
+         else
+            blue = green = 255 - static_cast<int>((relative_hotness * 2_real - 1_real) * 128_real);
+      }
+
+      // Write the measurement heading                                  
       if (act) {
-         out << "<details open><summary><h3>" << name
+         out << "<details open style=\"color:rgb("<<red<<","<<green<<","<<blue<<");\"><summary><h3>" << name
              << " [BUILD: " << std::string(std::begin(hex), std::end(hex)) << "]</h3></summary>\n";
       }
       else {
-         out << "<details><summary><h3>" << name
+         out << "<details      style=\"color:rgb("<<red<<","<<green<<","<<blue<<");\"><summary><h3>" << name
              << " [BUILD: " << std::string(std::begin(hex), std::end(hex)) << "]</h3></summary>\n";
       }
 
@@ -284,8 +322,11 @@ namespace Langulus::Profiler
          out << "<div>- max time per call: " << RealMs(max)     << " ms;</div>\n";
          out << "<div>- " << samples << " executions, for total time: " << RealMs(total) << " ms;</div>\n";
       }
-      else {
+      else if (samples == 1) {
          out << "<div>- 1 execution, for total time: " << RealMs(total) << " ms;</div>\n";
+      }
+      else {
+         out << "<div>- <span style=\"background-color: ForestGreen;\">still running...</span> total time until now: " << RealMs(total) << " ms;</div>\n";
       }
 
       // Write time usage portion                                       
