@@ -138,6 +138,7 @@ namespace Langulus::Profiler
          // Once it stops we dump the results in a file                 
          active_builds.insert(b->build);
          Instance.End();
+         main = nullptr;
          return;
       }
 

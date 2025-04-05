@@ -56,7 +56,7 @@ namespace Langulus::Profiler
       using Database = ::std::unordered_map<String, ::std::unordered_map<Build, ResultPtr>>;
 
    private:
-      Measurement* main;
+      Measurement* main = nullptr;
       Database results;
       ::std::unordered_set<Build> active_builds;
 
